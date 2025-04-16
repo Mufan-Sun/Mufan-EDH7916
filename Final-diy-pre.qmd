@@ -1,0 +1,403 @@
+---
+title: "Final DIY Pre"
+format: pdf
+author: "Mufan Sun"
+---
+
+*For this project I used three .csv data files from IPEDS survey year 2023, institutional characteristics HD2023, 12-month enrollment EFFY2023 and finance F2223_F1A. These can be downloaded from [here](https://nces.ed.gov/ipeds/datacenter/DataFiles.aspx?year=2023&sid=f1f3fce1-1f95-4f3f-906a-49db6532c654&rtid=1) by clicking on the named files name under “Data Files”. To run this code, save these files in a sub-folder called “data” that sits in the same folder as this .qmd file.*
+
+```{r}
+#| message: TRUE
+library(tidyverse)
+library(haven)
+library(labelled)
+library(scales)
+library(ggplot2)
+library(hexbin)
+library(broom)
+library(dplyr)
+library(usmap)
+library(ggpmisc)
+library(knitr)
+
+# Step 1: Download IPEDtaS.R script and save it
+download.file("https://raw.githubusercontent.com/Mufan-Sun/Mufan-EDH7916/refs/heads/main/IPEDtaS.R", destfile = "IPEDtaS.R")
+
+# Step 2: Load IPEDtaS.R script
+source("IPEDtaS.R")
+
+# Step 3: Load processed data files
+hd <- read_dta("data/HD2023.dta") |> rename_with(toupper)
+enroll <- read_dta("data/EFFY2023.dta") |> rename_with(toupper)
+finance <- read_csv(
+  "https://raw.githubusercontent.com/Mufan-Sun/Mufan-EDH7916/main/f2223_f1a.csv",
+  na = c("", "NA", ".", "NULL")
+) |>
+  select(UNITID, F1B01, F1B02, F1B03, F1D01)  
+
+
+# Focusing on public institutions  
+# Reason for adjustment: The financial data for private institutions (F1D01 [Total revenues and other additions] and F1B01 [Tuition and fees, after deducting discounts and allowances]) are entirely missing  
+# Solution: Focus on public institutions (CONTROL == 1)  
+final_data <- hd |>
+  filter(CONTROL == 1) |>
+  select(UNITID, OBEREG, everything()) |>  
+  left_join(enroll, by = "UNITID") |>
+  left_join(finance, by = "UNITID") |>
+  filter(EFYTOTLT > 0, F1D01 > 0)
+
+
+# Create analysis variables
+analysis_df <- final_data |> 
+  mutate(
+    interstu_pct = (EFYNRALT / EFYTOTLT) * 100, 
+    tuition_dependency = (F1B01 / F1D01) * 100,
+    gov_funding = ((F1B02 + F1B03) / F1D01) * 100
+  ) |> 
+  filter(
+    !is.na(interstu_pct),
+    !is.na(tuition_dependency),
+    !is.na(gov_funding),
+    !is.na(OBEREG),
+    !is.na(CONTROL),
+    CONTROL != -3  # Not available
+  ) |> 
+  mutate(
+    OBEREG = factor(OBEREG, levels = 0:9, labels = c(
+      "U.S. Service schools",
+      "New England",
+      "Mid East",
+      "Great Lakes",
+      "Plains",
+      "Southeast",
+      "Southwest",
+      "Rocky Mountains",
+      "Far West",
+      "Other U.S. jurisdictions"
+    )),
+    CONTROL = factor(CONTROL, levels = 1:3, labels = c(
+      "Public",
+      "Private not-for-profit",
+      "Private for-profit"
+    ))
+  )
+
+# Define the theme for plots
+theme_uf <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, color = "black"),
+    axis.title = element_text(color = "black", face = "bold"),
+    axis.text = element_text(color = "#333333"),
+    legend.position = "bottom",
+    panel.grid.major = element_line(color = "#F0F0F0"),
+    strip.text = element_text(face = "bold", color = "#FA4616")  
+  )
+
+# Plot 1: International student proportion distribution
+ggplot(analysis_df, aes(x = interstu_pct)) +
+  geom_histogram(fill = "#0021A5", bins = 30, alpha = 0.8, color = "white") +
+  labs(
+    title = "International Student Proportion Distribution (Public Institutions)",
+    x = "Percentage of International Students (%)",
+    y = "Number of Schools"
+  ) +
+  scale_x_continuous(labels = percent_format(scale = 1)) +
+  coord_cartesian(xlim = c(0, 50)) +
+  geom_vline(aes(xintercept = median(interstu_pct)), color = "#FA4616", linetype = "dashed", linewidth = 1) +
+  annotate("text", 
+           x = median(analysis_df$interstu_pct), 
+           y = 25000, 
+           label = paste("Median:", round(median(analysis_df$interstu_pct), 1), "%"),
+           color = "#FA4616", fontface = "bold", hjust = -0.1) +
+  theme_uf +
+   theme(
+    plot.title = element_text(size = 14)  
+  )
+  
+
+
+
+
+# Plot 2: Tuition dependency
+median_val <- median(analysis_df$tuition_dependency, na.rm = TRUE)
+
+ggplot(analysis_df, aes(x = "Public Institutions", y = tuition_dependency)) +
+  geom_boxplot(fill = "#FA4616", color = "orange", alpha = 0.7, outlier.size = 1.5) +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 4, color = "#0021A5") +
+  geom_hline(yintercept = 50, linetype = "dotted", color = "#6E7B8B") +
+  annotate("text", 
+           x = 1.5, 
+           y = median_val + 5, 
+           label = paste("Median:", round(median_val, 1), "%"), color = "#0021A5", fontface = "bold") +
+  labs(title = "Tuition Dependency in Public Institutions",
+       x = "", y = "Tuition Revenue Proportion (%)") +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  theme_uf
+
+
+
+
+# Plot 3: Government funding relationship
+cor_value <- cor(analysis_df$gov_funding, analysis_df$interstu_pct, use = "complete.obs")
+
+ggplot(analysis_df, aes(x = gov_funding, y = interstu_pct)) +
+  geom_jitter(alpha = 0.3, color = "#0021A5", size = 1, width = 1.5, height = 1.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "#FA4616", size = 1.2, aes(linetype = "Linear Fit")) +
+  geom_smooth(method = "loess", se = FALSE, color = "#22884C", size = 1.2, aes(linetype = "LOESS Fit")) +
+  scale_linetype_manual(name = "Trend Line", values = c("Linear Fit" = "solid", "LOESS Fit" = "dashed")) +
+  scale_x_continuous(labels = percent_format(scale = 1), limits = c(0, 60)) +
+  scale_y_continuous(labels = percent_format(scale = 1), limits = c(0, 100)) +
+  annotate(
+  "text",
+  x = 55,
+  y = 95,
+  label = paste0("italic(r)==", round(cor_value, 2)),
+  parse = TRUE,
+  size = 5,
+  hjust = 0,
+  color = "#0021A5"
+) +
+  labs(
+    title = "Government Funding vs International Students",
+    subtitle = "Public Institutions Only",
+    x = "Proportion of Government Funding (%)",
+    y = "Proportion of International Students (%)"
+  ) +
+  theme_uf +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10))
+  )
+
+
+# Plot 4: Hexbin plot
+ggplot(analysis_df, aes(x = gov_funding, y = interstu_pct)) +
+  geom_hex(bins = 50) +
+  scale_fill_gradient(low = "#0021A5", high = "#FA4616", trans = "log", name = "Density") +
+  labs(title = "Density of Institutions: Gov Funding vs Intl Students",
+       x = "Proportion of Government Funding (%)",
+       y = "Proportion of International Students (%)") +
+  scale_x_continuous(labels = percent_format(scale = 1)) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  geom_hex(bins = 50, color = "white") +
+  guides(fill = guide_colorbar(
+  direction = "horizontal",
+  barwidth = 20,     
+  barheight = 0.6
+)) +
+theme(
+  legend.position = "top",                  
+  legend.title = element_text(size = 12),    
+  legend.text = element_text(size = 9)       
+) +
+  theme_uf
+
+
+
+# Plot 5: Facet by region
+ggplot(analysis_df, aes(x = gov_funding, y = interstu_pct)) +
+  geom_point(alpha = 0.4, color = "#0021A5", size = 0.8) +
+  geom_smooth(method = "lm", se = FALSE, color = "#FA4616", size = 1) +
+  facet_wrap(~ OBEREG) +
+  labs(title = "Gov Funding vs Intl Students by Region",
+       x = "Proportion of Government Funding (%)",
+       y = "Proportion of International Students (%)") +
+  scale_x_continuous(labels = percent_format(scale = 1)) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  theme_uf +
+    theme(
+    strip.text = element_text(
+      size = 10,  
+      face = "bold", 
+      color = "#FA4616"  
+    )
+  )
+
+
+
+# Model 1: International student proportion → Tuition dependency
+model1 <- lm(tuition_dependency ~ interstu_pct + OBEREG, data = analysis_df)
+summary(model1)
+
+# Visualize regression coefficients (Model 1)
+label_lookup <- c(
+  "interstu_pct" = "International Students (%)",
+  "OBEREGNew England" = "New England",
+  "OBEREGMid East" = "Mid East",
+  "OBEREGGreat Lakes" = "Great Lakes",
+  "OBEREGPlains" = "Plains",
+  "OBEREGSoutheast" = "Southeast",
+  "OBEREGSouthwest" = "Southwest",
+  "OBEREGRocky Mountains" = "Rocky Mountains",
+  "OBEREGFar West" = "Far West",
+  "OBEREGOther U.S. jurisdictions" = "Other Jurisdictions",
+  "OBEREGU.S. Service schools" = "U.S. Service Schools"
+)
+
+model1_tidy <- tidy(model1, conf.int = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(term_label = recode(term, !!!label_lookup))
+print(colnames(model1_tidy))
+
+ggplot(model1_tidy, aes(x = reorder(term_label, estimate), y = estimate)) +
+  geom_col(fill = "#0021A5", width = 0.6) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2, color = "#FA4616") +
+  geom_text(aes(label = round(estimate, 3)), 
+            hjust = ifelse(sign(model1_tidy$estimate) > 0, -0.1, 1.1), size = 3.5) +
+  coord_flip() +
+  labs(
+    title = "Effect of International Student Proportion on Tuition Dependency",
+    subtitle = "Model 1 Coefficients with 95% Confidence Intervals",
+    x = "Predictors", y = "Coefficient Estimate"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", color = "black"),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+# Model 2: International student proportion → Government funding dependency
+model2 <- lm(gov_funding ~ interstu_pct + OBEREG, data = analysis_df)
+summary(model2)
+
+# Model 3: Regional interaction effects (Tuition dependency)
+model3 <- lm(tuition_dependency ~ interstu_pct * OBEREG, data = analysis_df)
+summary(model3)
+
+# Compare models with and without interaction terms
+anova_comparison <- anova(model1, model3)
+print(anova_comparison)
+
+# Additional commentary: Interpret the significance of interaction terms
+if (anova_comparison$'Pr(>F)'[2] < 0.05) {
+  cat("The interaction between international student proportion and region significantly affects tuition dependency.\n")
+} else {
+  cat("The interaction between international student proportion and region does not significantly affect tuition dependency.\n")
+}
+
+
+
+# Plot: Map of average international student proportion by state
+state_names <- tibble(
+  state = tolower(state.name),
+  abb = state.abb
+)
+
+state_summary <- analysis_df |> 
+  group_by(STABBR) |> 
+  summarise(mean_international = mean(interstu_pct, na.rm = TRUE), .groups = "drop") |> 
+  left_join(state_names, by = c("STABBR" = "abb"))
+
+state_map <- map_data("state")
+map_df <- left_join(state_map, state_summary, by = c("region" = "state"))
+
+ggplot(map_df, aes(long, lat, group = group, fill = mean_international)) +
+  geom_polygon(color = "white") +
+  coord_fixed(1.3) +
+  scale_fill_gradient(
+    low = "#D0E1F9", high = "#0021A5",
+    name = "Intl Students (%)",
+    labels = percent_format(scale = 1),
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Average International Student Proportion by State",
+    subtitle = "Based on IPEDS Public Institutions"
+  ) +
+  theme_void(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, color = "black"),
+    plot.subtitle = element_text(size = 12, color = "gray40"),
+    legend.title = element_text(color = "black", face = "bold"),
+    legend.position = "right"
+  )
+
+
+# Plot 6: Tuition Dependency Boxplot by Region
+ggplot(analysis_df, aes(x = OBEREG, y = tuition_dependency)) +
+  geom_boxplot(fill = "#FA4616", alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.2, color = "#0021A5", size = 0.5) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  labs(title = "Tuition Dependency by Region (Public Institutions)",
+       x = "Region", y = "Tuition Revenue Proportion (%)") +
+  theme_uf +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 7: Tuition Dependency vs International Students - Hexbin and Trend line
+ggplot(analysis_df, aes(x = interstu_pct, y = tuition_dependency)) +
+  geom_hex(bins = 50) +
+  geom_smooth(method = "lm", color = "#FA4616", size = 1.2) +
+  scale_fill_gradient(low = "#D2E3F3", high = "#0021A5", name = "Density") +
+  labs(title = "Tuition Dependency vs International Students (Hexbin + Trend)",
+       x = "Proportion of International Students (%)",
+       y = "Tuition Dependency (%)") +
+  scale_x_continuous(labels = percent_format(scale = 1)) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  theme_uf
+
+# Plot 8: Government Funding vs Tuition Dependency
+ggplot(analysis_df, aes(x = gov_funding, y = tuition_dependency)) +
+  geom_point(alpha = 0.4, color = "#0021A5", size = 1) +
+  geom_smooth(method = "lm", se = FALSE, color = "#FA4616", size = 1) +
+  labs(title = "Government Funding vs Tuition Dependency",
+       x = "Government Funding Proportion (%)",
+       y = "Tuition Dependency (%)") +
+  scale_x_continuous(labels = percent_format(scale = 1)) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  theme_uf
+
+
+# Creating tables for summary and comparison
+
+# Summary table
+summary_table <- analysis_df |> 
+  summarise(
+    Mean_Interstu_Pct = mean(interstu_pct, na.rm = TRUE),
+    Median_Interstu_Pct = median(interstu_pct, na.rm = TRUE),
+    Mean_Tuition_Dependency = mean(tuition_dependency, na.rm = TRUE),
+    Median_Tuition_Dependency = median(tuition_dependency, na.rm = TRUE),
+    Mean_Gov_Funding = mean(gov_funding, na.rm = TRUE),
+    Median_Gov_Funding = median(gov_funding, na.rm = TRUE)
+  ) |> 
+  mutate(across(everything(), ~ round(., 2)))
+
+kable(summary_table, caption = "Summary Statistics Table", digits = 2)  
+
+# Regression Results table for Model 1
+model1_results <- tidy(model1, conf.int = TRUE) |> 
+  filter(term != "(Intercept)") |> 
+  mutate(
+    term_label = recode(term, !!!label_lookup),
+    across(c(estimate, std.error, statistic, p.value, conf.low, conf.high), 
+           ~ round(., 2))
+  )
+
+kable(model1_results, caption = "Regression Coefficients: Model 1", digits = 2)
+
+# Regression Results table for Model 2
+model2_results <- tidy(model2, conf.int = TRUE) |> 
+  filter(term != "(Intercept)") |> 
+  mutate(
+    term_label = recode(term, !!!label_lookup),
+    across(c(estimate, std.error, statistic, p.value, conf.low, conf.high), 
+           ~ round(., 2))  
+  )
+
+kable(model2_results, caption = "Regression Coefficients: Model 2", digits = 2)
+
+# Table for Regional Comparison
+regional_comparison_table <- analysis_df |> 
+  group_by(OBEREG) |> 
+  summarise(
+    Mean_Interstu_Pct = mean(interstu_pct, na.rm = TRUE),
+    Mean_Tuition_Dependency = mean(tuition_dependency, na.rm = TRUE),
+    Mean_Gov_Funding = mean(gov_funding, na.rm = TRUE)
+  ) |> 
+  mutate(across(where(is.numeric), ~ round(., 2))) |> 
+  arrange(OBEREG)
+
+kable(regional_comparison_table, caption = "Regional Comparison of Variables", digits = 2)
+```
