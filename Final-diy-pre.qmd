@@ -400,4 +400,6 @@ regional_comparison_table <- analysis_df |>
   arrange(OBEREG)
 
 kable(regional_comparison_table, caption = "Regional Comparison of Variables", digits = 2)
+
+
 ```
